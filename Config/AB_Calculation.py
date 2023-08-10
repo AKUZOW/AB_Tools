@@ -143,3 +143,117 @@ plt.show()
 # =============================================================================
 # 
 # =============================================================================
+def agg_totals(df):    
+    """Ф-ция расчета агрегат"""
+    
+    names = {
+        "gmv": df['driver_bill'].sum(),
+        "cost": df['fee'].sum(),
+        "orders_count": df['orders_count'].sum(),
+        'n': df['driver_id'].nunique(),
+        "orders_per_driver": df['orders_count'].sum() / df['driver_id'].nunique(),
+        "gmv_per_driver": df['driver_bill'].sum() / df['driver_id'].nunique()
+    }
+    return pd.Series(names)
+
+def pivot_df(df, col_names=['metric_name', 'value_1', 'value_2']):
+    """Пивот таблицы для удобной работы c расчетом fixed horizon"""
+    
+    df = pd.melt(df, id_vars=['split']) \
+        .pivot_table(index=['variable'], columns=['split'], values='value') \
+        .reset_index()
+    df.columns = col_names
+    return df
+
+
+# Препроцесс
+split_level_agg = pivot_df(
+    df.groupby('split').apply(agg_totals).reset_index()
+)
+
+# отдельно считаем группировку по пользователям, чтобы независимо посчитать дисперсию (т.к. в оригинале дубли)
+driver_level_agg = pivot_df(
+    df.groupby(['split','driver_id']).apply(agg_totals).reset_index(), ['metric_name', 'std_1', 'std_2']
+)
+
+exp_res = split_level_agg.merge(driver_level_agg)
+exp_res['n_1'] = int(split_level_agg['value_1'][split_level_agg.metric_name == 'n'])
+exp_res['n_2'] = int(split_level_agg['value_2'][split_level_agg.metric_name == 'n'])
+
+alpha = 0.05
+power = 0.8
+
+# расчет t-критерия из готовых статистик
+_, exp_res['pvalue'] = ttest_ind_from_stats(
+    mean1 = exp_res['value_1'], 
+    std1 = exp_res['std_1'], 
+    nobs1 = exp_res['n_1'], 
+    mean2 = exp_res['value_2'], 
+    std2 = exp_res['std_2'], 
+    nobs2 = exp_res['n_2'], 
+    equal_var = False)
+
+# считаем стандартизированный эффект сайз с которым потом будем сравнивать mde
+exp_res['lift'] = (exp_res['value_2'] - exp_res['value_1']) / exp_res['value_1']
+exp_res['effect_size'] = abs(exp_res['value_1'] / exp_res['std_1'] * exp_res['lift'])
+
+# Считаем мде и необходимое количество наблюдений. 
+exp_res['mde'] = [tt_ind_solve_power(nobs1=row[0], alpha=alpha, power=power) for row in zip(exp_res['n_1'])]
+exp_res['n_need'] = [tt_ind_solve_power(row[0], alpha=alpha, power=power) for row in zip(exp_res['effect_size'])]
+
+# Увидим ошибки, но не обращаем внимания на них. В первом случае нереально большой эффект, а во втором дисперсия равная единице
+# также не обращаем внимание на метрики n, orders_count, gmv
+exp_res = exp_res[~exp_res.metric_name.isin(['n','orders_count','gmv'])]
+display(exp_res)
+
+# =============================================================================
+# Bootstrap
+# =============================================================================
+# Объявим функцию, которая позволит проверять гипотезы с помощью бутстрапа
+def get_bootstrap(
+    data_0: list, # числовые значения первой выборки
+    data_1: list, # числовые значения второй выборки
+    boot_it: int = 1000, # количество бутстрэп-подвыборок
+    statistic = np.mean, # интересующая нас статистика
+    conf_level: float = 0.95, # уровень значимости,
+    ba: bool = False
+):
+    boot_data = []
+    for _ in tqdm(range(boot_it)): # извлекаем подвыборки
+        boot_0 = data_0.sample(len(data_0), replace = True).values
+        boot_1 = data_1.sample(len(data_1), replace = True).values
+        boot_data.append(statistic(boot_0) - statistic(boot_1)) # mean() - применяем статистику
+        
+    # поправляем смещение
+    if ba:
+        orig_theta = statistic(data_0)-statistic(data_1) # разница в исходных данных
+        boot_theta = np.mean(boot_data) # среднее по бутстрапированной разнице статистик
+        delta_val = abs(orig_theta - boot_theta) # дельта для сдвига
+        boot_data = [i - delta_val for i in boot_data] # сдвигаем бут разницу статистик, обратите внимание, что тут не вычитание
+        print(f"""
+            До бутстрапа: {orig_theta},
+            После бутстрапа: {boot_theta},
+            После коррекции: {np.mean(boot_data)}"""
+        )
+
+    left_quant = (1 - conf_level)/2
+    right_quant = 1 - (1 - conf_level) / 2
+    ci = pd.DataFrame(boot_data).quantile([left_quant, right_quant])
+
+    # p-value
+    p_1 = norm.cdf(x = 0, loc = np.mean(boot_data), scale = np.std(boot_data))
+    p_2 = norm.cdf(x = 0, loc = -np.mean(boot_data), scale = np.std(boot_data))
+    p_value = min(p_1, p_2) * 2
+        
+    # Визуализация
+    plt.hist(pd.DataFrame(boot_data)[0], bins = 50)
+    plt.style.use('ggplot')
+    plt.vlines(ci,ymin=0,ymax=100,linestyle='--')
+    plt.xlabel('boot_data')
+    plt.ylabel('frequency')
+    plt.title("Histogram of boot_data")
+    plt.show()
+       
+    return {"boot_data": boot_data, 
+            "ci": ci, 
+            "p_value": p_value}

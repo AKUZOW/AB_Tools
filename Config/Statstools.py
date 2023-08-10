@@ -207,3 +207,104 @@ df = df.sort_values(by="p_values")
 df["bonferroni_p"] = multipletests(df.p_values, method='bonferroni')[1]
 df["holm_p"] = multipletests(df.p_values, method='holm')[1]
 df["bh_p"] = multipletests(df.p_values, method='fdr_bh')[1]
+# =============================================================================
+# =============================================================================
+# Bootstrap
+# =============================================================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+plt.style.use('ggplot')
+
+n_row = 1000
+orders = pd.DataFrame({"revenue": np.random.randint(0, 4000, n_row)})
+orders
+
+boot_it = 2000
+mean_boot_data = []
+median_boot_data = []
+boot_conf_level = 0.95
+for i in range(boot_it):
+    samples = orders['revenue'].sample(len(orders['revenue']), replace = True)
+    mean_boot_data.append(np.mean(samples))
+    median_boot_data.append(np.median(samples))
+
+print(f"""
+      Original mean: {np.mean(orders["revenue"])}, Boot mean: {np.mean(mean_boot_data)}
+      Original median: {np.median(orders["revenue"])}, Boot median: {np.mean(median_boot_data)}
+      """)
+
+# Скорректируем оценку
+orig_theta = np.median(orders['revenue'])
+boot_theta = np.mean(median_boot_data) # среднее по бутстрапированной статистике
+delta_val = abs(orig_theta - boot_theta) # дельта для сдвига
+median_boot_data = [i - delta_val for i in median_boot_data] # сдвигаем бут разницу статистик
+
+print(f'Original: {orig_theta}, Boot: {boot_theta}, Boot ba: {np.mean(boot_data)}')
+
+
+# Найдем доверительный интервал
+left_ci = (1 - boot_conf_level)/2
+right_ci = 1 - (1 - boot_conf_level) / 2
+
+ci_median = pd.Series(median_boot_data).quantile([left_ci, right_ci])
+ci_mean = pd.Series(mean_boot_data).quantile([left_ci, right_ci])
+
+print(f"""
+{ci_median}, 
+{ci_mean}
+""")
+
+
+plt.hist(pd.Series(median_boot_data), bins = 50)
+plt.style.use('ggplot')
+plt.vlines(ci_median,ymin=0,ymax=300,linestyle='--',colors='black')
+plt.xlabel('boot_data')
+plt.ylabel('frequency')
+plt.title("Histogram of boot_data")
+plt.show()
+# =============================================================================
+# =============================================================================
+# Buckets
+# =============================================================================
+import numpy as np
+import scipy.stats as sts
+from scipy.stats import norm
+import pandas as pd
+import matplotlib.pyplot as plt
+
+plt.style.use('ggplot')
+
+from tqdm.auto import tqdm
+
+
+b_n = 5000
+n = 100000
+
+val_1 = np.random.exponential(scale=1/0.01, size=n)
+val_2 = np.random.exponential(scale=1/0.011, size=n)
+
+sample_exp = pd.DataFrame({
+    "values":   np.concatenate([val_1, val_2]),  
+    "variant":  ["A" for i in range(n)] + ["B" for i in range(n)],
+    "backet":   [i for i in range(b_n)] * int(n*2/b_n)
+})
+
+
+backeted_sample_exp = sample_exp.groupby(by=["backet","variant"])["values"].agg(
+                                        mu=np.mean, 
+                                        sd_mu=np.std).reset_index()
+
+round(np.mean(sample_exp["values"]),5) == round(np.mean(backeted_sample_exp["mu"]),5)
+
+np.var(sample_exp["values"]) / len(sample_exp["values"])
+np.var(backeted_sample_exp["mu"]) / len(backeted_sample_exp["mu"])
+
+viz = sample_exp["values"].plot(kind="hist", color="grey", figsize=(8,5), bins=50)
+viz.set_xlabel("values")
+viz.set_ylabel("count")
+
+viz = backeted_sample_exp["mu"].plot(kind="hist", color="grey", figsize=(8,5), bins=50)
+viz.set_xlabel("mu")
+viz.set_ylabel("count")
