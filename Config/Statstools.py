@@ -186,3 +186,24 @@ print("Two Sample t-test")
 print("t =", res[0])
 print("p-value =", res[1])
 print("df = ", res[2])
+# =============================================================================
+# =============================================================================
+# Multiple testing
+# =============================================================================
+import numpy as np
+import pandas as pd
+from statsmodels.sandbox.stats.multicomp import multipletests
+
+p_values = np.array([0.0029179437568, 0.009391279264, 0.011581441488, 
+                     0.012616868376, 0.02839967164, 0.042167014336, 
+                     0.04286582096, 0.0956598092, 0.10742021336, 
+                     0.15927677808, 0.19332229592, 0.2456475724, 
+                     0.254595706, 0.28608461424, 0.3626124616])
+
+names = ["test" + str(i) for i in range(1, len(p_values) + 1)]
+
+df = pd.DataFrame({"names":names, "p_values":p_values})
+df = df.sort_values(by="p_values")
+df["bonferroni_p"] = multipletests(df.p_values, method='bonferroni')[1]
+df["holm_p"] = multipletests(df.p_values, method='holm')[1]
+df["bh_p"] = multipletests(df.p_values, method='fdr_bh')[1]
