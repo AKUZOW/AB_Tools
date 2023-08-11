@@ -11,6 +11,10 @@ def get_ci_95(x):
     ci_lower = np.mean(x) - 1.96*get_se(x)
     return {"ci_lower": ci_lower,
             "ci_upper": ci_upper}
+
+def agg_totals(x):
+    names = { 'revenue_amt': sum(x['bill']), 'session_cnt': x['session_id'].nunique() }
+    return pd.Series(names)
 # =============================================================================
 # Ztest
 # =============================================================================
@@ -308,3 +312,12 @@ viz.set_ylabel("count")
 viz = backeted_sample_exp["mu"].plot(kind="hist", color="grey", figsize=(8,5), bins=50)
 viz.set_xlabel("mu")
 viz.set_ylabel("count")
+
+
+bucket_num = 500
+buckets = np.repeat(np.arange(0, bucket_num), len(df) // bucket_num)
+reminder = np.arange(0, len(df) - len(buckets))
+buckets = np.append(buckets, reminder)
+df['bucket'] = buckets
+df_b = df.groupby(["bucket", "variant"]).apply(agg_totals).reset_index()
+print(df_b)

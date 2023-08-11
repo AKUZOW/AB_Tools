@@ -205,7 +205,105 @@ exp_res['n_need'] = [tt_ind_solve_power(row[0], alpha=alpha, power=power) for ro
 # также не обращаем внимание на метрики n, orders_count, gmv
 exp_res = exp_res[~exp_res.metric_name.isin(['n','orders_count','gmv'])]
 display(exp_res)
+# =============================================================================
+# =============================================================================
+# Stratification
+# =============================================================================
+treatment_effect = 1
+# Объявим дф с 3 стратами, где у всех отличается дисперсия и средние
+def gen_data(treatment_effect = 0):
 
+    stratum_1 = pd.DataFrame({"group": "stratum_1", "val": norm.rvs(size=12000, loc=15 + treatment_effect, scale=2)})
+    stratum_2 = pd.DataFrame({"group": "stratum_2", "val": norm.rvs(size=6000, loc=20 + treatment_effect, scale=2.5)})
+    stratum_3 = pd.DataFrame({"group": "stratum_3", "val": norm.rvs(size=2000, loc=30 + treatment_effect, scale=3)})
+
+    return pd.concat([stratum_1, stratum_2, stratum_3])
+
+df_control = gen_data()
+df_control["variant"] = "Control"
+df_control["indx"] = df_control.index
+
+df_treatment = gen_data(treatment_effect)
+df_treatment["variant"] = "Treatment"
+df_treatment["indx"] = df_treatment.index
+
+df_combined = pd.concat([df_control, df_treatment]).reset_index()
+
+sns.histplot(data=df_combined, x="val", hue="variant", element="poly")
+g = sns.FacetGrid(df_combined, col="variant", hue="group")
+g.map_dataframe(sns.histplot, x="val")
+g.add_legend()
+
+# without strat
+normal_te = pd.DataFrame({
+    "effect_estimate": np.mean(df_treatment.val - df_control.val),
+    "effect_estimate_se": np.sqrt(np.var(df_treatment.val) / len(df_treatment.val) + np.var(df_control.val) / len(df_control.val)),
+    "n": len(df_treatment.val) + len(df_control.val)
+}, index=[0])
+print(normal_te)
+
+def get_effect_estimate_se(treatment, control):
+    return np.sqrt(np.var(treatment) / len(treatment) + np.var(control) / len(control))
+
+def get_effect_estimate(treatment, control):
+    return np.mean(treatment - control)
+
+# with strats
+groups = {}
+for k, group in df_combined.groupby(by="group"):
+    cur_df = pd.DataFrame()
+    for g, variant in group.groupby(by="variant"):
+        cur_df = pd.concat([cur_df, variant])
+    groups[k] = cur_df
+
+effect_estimate_se = []
+effect_estimate = []
+n = []
+stratums = []
+
+for key, df in groups.items():
+    control = df[df.variant=="Control"]
+    treatment = df[df.variant=="Treatment"]
+    effect_estimate_se.append(get_effect_estimate_se(treatment.val, control.val))
+    effect_estimate.append(get_effect_estimate(treatment.val, control.val))
+    n.append(len(df))
+    stratums.append(key)
+    
+strat_te = pd.DataFrame({
+    "group": stratums,
+    "effect_estimate_se": effect_estimate_se,
+    "effect_estimate": effect_estimate,
+    "n": n
+})
+strat_te["effect_estimate_se"] = strat_te["effect_estimate_se"]*strat_te["n"]/np.sum(strat_te["n"])
+strat_te["effect_estimate"] = strat_te["effect_estimate"]*strat_te["n"]/np.sum(strat_te["n"])
+
+strat_te = strat_te[["effect_estimate_se","effect_estimate","n"]].apply("sum")
+print(strat_te)
+
+res = (1-(strat_te.effect_estimate_se/normal_te.effect_estimate_se))*100 
+print(f"""
+    Сокращение дисперсии на {res[0]}%
+""")
+# =============================================================================
+# =============================================================================
+# CUPED
+# =============================================================================
+import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
+
+np.mean(df.loc[df.variant==1, 'revenue_after']) - np.mean(df.loc[df.variant==0, 'revenue_after'])
+smf.ols('revenue_after ~ variant', data=df).fit().summary().tables[1]
+
+theta = smf.ols('revenue_after ~ revenue_before', data=df).fit().params[1]
+df['revenue_cuped'] = df['revenue_after'] - theta * (df['revenue_before'] - np.mean(df['revenue_before']))
+smf.ols('revenue_cuped ~ variant', data=df).fit().summary().tables[1]
+theta = df['revenue_before'].cov(df['revenue_after']) / df['revenue_before'].var() 
+df['revenue_cuped'] = df['revenue_after'] - theta * (df['revenue_before'] - np.mean(df['revenue_before']))
+smf.ols('revenue_cuped ~ variant', data=df).fit().summary().tables[1]
+
+# =============================================================================
 # =============================================================================
 # Bootstrap
 # =============================================================================
@@ -257,3 +355,220 @@ def get_bootstrap(
     return {"boot_data": boot_data, 
             "ci": ci, 
             "p_value": p_value}
+# =============================================================================
+# =============================================================================
+# Bootstrap Ratio
+# =============================================================================
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy.stats import poisson, binom
+from tqdm import tqdm
+
+def bootstrap_ratio(df, variant_col, num_col, den_col, boot_it):
+    is_test = df[variant_col] == 1
+    rto_0 = sum(df[num_col][df[variant_col] == 0]) / sum(df[den_col][df[variant_col] == 0])
+    rto_1 = sum(df[num_col][df[variant_col] == 1]) / sum(df[den_col][df[variant_col] == 1])
+    delta = abs(rto_0 - rto_1)
+    count = 0
+    
+    for i in range(boot_it):
+        booted_index = is_test.sample(len(is_test)).values
+        sample_0 = sum(df.loc[True == booted_index][num_col]) / sum(df.loc[True == booted_index][den_col])
+        sample_1 = sum(df.loc[False == booted_index][num_col]) / sum(df.loc[False == booted_index][den_col])
+
+        if abs(sample_0-sample_1)>=delta:
+            count += 1
+    pvalue = count / boot_it
+    
+    return pvalue
+
+
+def bootstrap_ratio(df, variant_col, num_col, den_col, boot_it):
+    is_test = df[variant_col] == 1
+    rto_0 = sum(df[num_col][df[variant_col] == 0]) / sum(df[den_col][df[variant_col] == 0])
+    rto_1 = sum(df[num_col][df[variant_col] == 1]) / sum(df[den_col][df[variant_col] == 1])
+    delta = abs(rto_0 - rto_1)
+    count = 0
+    
+    for i in range(boot_it):
+        booted_index = is_test.sample(len(is_test)).values
+        sample_0 = sum(df.loc[True == booted_index][num_col]) / sum(df.loc[True == booted_index][den_col])
+        sample_1 = sum(df.loc[False == booted_index][num_col]) / sum(df.loc[False == booted_index][den_col])
+
+        if abs(sample_0-sample_1)>=delta:
+            count += 1
+    pvalue = count / boot_it
+    return pvalue
+
+
+N = 10000
+n_sim = 500
+alpha = 0.5
+pvalue_list = []
+
+for i in tqdm(range(n_sim), desc="Simulation Progress"):
+    if i % 100 == 0:
+        print(i)
+        
+    df = pd.DataFrame({
+        "variant": binom.rvs(1, 0.5, size=N), 
+        "numerator": np.random.poisson(10, N),
+        "denominator": np.random.poisson(5, N)
+    })
+
+    pvalue = bootstrap_ratio(df, "variant", "numerator", "denominator", 100)
+    pvalue_list.append(pvalue)
+
+print(sum(np.array(pvalue_list) < alpha) / n_sim)
+sns.histplot(pvalue_list)
+# =============================================================================
+# =============================================================================
+# Poisson Bootstrap
+# =============================================================================
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy.stats import poisson, binom
+
+def poisson_bootstrap(num_0, den_0, num_1, den_1, n_bootstrap=2000):
+
+    rto0 = np.array([num_0 / den_0])
+    rto1 = np.array([num_1 / den_1])
+
+    poisson_0 = poisson(1).rvs((n_bootstrap, rto0.size)).astype(np.int64)
+    poisson_1 = poisson(1).rvs((n_bootstrap, rto1.size)).astype(np.int64)
+    
+    den_0 = np.array([den_0])
+    den_1 = np.array([den_1])
+    
+    rto0 = np.matmul(rto0 * den_0, poisson_0.T)
+    w0 = np.matmul(den_0, poisson_0.T)
+    rto1 = np.matmul(rto1 * den_1, poisson_1.T)
+    w1 = np.matmul(den_1, poisson_1.T)
+
+    delta = rto1 / w1 - rto0 / w0
+    positions = np.sum(delta < 0)
+
+    pvalue = 2 * np.minimum(positions, n_bootstrap - positions) / n_bootstrap
+    return pvalue
+
+def bootstrap_poisson(rto0, w0, rto1, w1, boot_it=500):
+    """
+    Пуассоновский бутстрап
+    :param rto0: Рассчитанное ratio для левого сплита
+    :param w0: Знаменатель rto0
+    :param rto1: Рассчитанное ratio для правого сплита
+    :param w1: Знаменатель rto1
+    :param boot_it: количество бут итераций
+    :return: pvalue
+    """
+    
+    poisson_0 = poisson(1).rvs((boot_it, rto0.size)).astype(np.int64)
+    poisson_1 = poisson(1).rvs((boot_it, rto1.size)).astype(np.int64)
+
+    rto1 = np.matmul(rto1 * w1, poisson_1.T)
+
+    w1 = np.matmul(w1, poisson_1.T)
+
+    rto0 = np.matmul(rto0 * w0, poisson_0.T)
+    w0 = np.matmul(w0, poisson_0.T)
+    
+    delta = rto1 / w1 - rto0 / w0
+    
+    positions = np.sum(delta < 0)
+
+    pvalue = 2 * np.minimum(positions, boot_it - positions) / boot_it
+    return pvalue
+
+n = 20000
+df = pd.DataFrame({
+    'session_cnt': np.random.randint(low = 1, high = 10, size = n),
+    'revenue_amt': np.random.exponential(100, size=n),
+    'split': np.random.randint(low = 0, high = 2, size = n)
+})
+
+display(df)
+
+%%timeit -r 10
+poisson_bootstrap(
+    df[1:100].revenue_amt[df[1:100].split == 0],
+    df[1:100].session_cnt[df[1:100].split == 0],
+    df[1:100].revenue_amt[df[1:100].split == 1],
+    df[1:100].session_cnt[df[1:100].split == 1]
+)
+# =============================================================================
+# =============================================================================
+# Delta Method
+# =============================================================================
+import numpy as np
+import pandas as pd
+from scipy.stats import norm, ttest_ind, poisson
+from tqdm.auto import tqdm
+import scipy
+import matplotlib.pyplot as plt
+
+def deltamethod(x_0, y_0, x_1, y_1):
+    n_0 = y_0.shape[0]-1
+    n_1 = y_0.shape[0]-1
+
+    mean_x_0, var_x_0 = np.mean(x_0), np.var(x_0)
+    mean_x_1, var_x_1 = np.mean(x_1), np.var(x_1)
+
+    mean_y_0, var_y_0 = np.mean(y_0), np.var(y_0)
+    mean_y_1, var_y_1 = np.mean(y_1), np.var(y_1)
+
+    cov_0 = np.mean((x_0 - mean_x_0.reshape(-1, )) * (y_0 - mean_y_0.reshape(-1, )))
+    cov_1 = np.mean((x_1 - mean_x_1.reshape(-1, )) * (y_1 - mean_y_1.reshape(-1, )))
+
+    var_0 = var_x_0 / mean_y_0 ** 2 + var_y_0 * mean_x_0 ** 2 / mean_y_0 ** 4 - 2 * mean_x_0 / mean_y_0 ** 3 * cov_0
+    var_1 = var_x_1 / mean_y_1 ** 2 + var_y_1 * mean_x_1 ** 2 / mean_y_1 ** 4 - 2 * mean_x_1 / mean_y_1 ** 3 * cov_1
+
+    rto_0 = np.sum(x_0) / np.sum(y_0)
+    rto_1 = np.sum(x_1) / np.sum(y_1)
+
+    statistic = (rto_1 - rto_0) / np.sqrt(var_0 / n_0 + var_1 / n_1)
+    pvalue = 2 * np.minimum(norm(0, 1).cdf(statistic), 1 - norm(0, 1).cdf(statistic))
+    return pvalue
+
+def deltamethod_bucketed(df_0, df_1, num_col, den_col, n_col):
+    x_0 = np.array(df_0[num_col])
+    x_1 = np.array(df_1[num_col])
+    y_0 = np.array(df_0[den_col])
+    y_1 = np.array(df_1[den_col])
+    n_0 = np.array(df_0[n_col].sum())
+    n_1 = np.array(df_1[n_col].sum())
+
+    mean_x_0 = x_0.sum() / n_0
+    mean_x_1 = x_1.sum() / n_1
+    mean_y_0 = y_0.sum() / n_0
+    mean_y_1 = y_1.sum() / n_1
+    
+    var_x_0 = np.sum(np.array([abs(a - mean_x_0)**2 for a in x_0])) / n_0
+    var_x_1 = np.sum(np.array([abs(a - mean_x_1)**2 for a in x_1])) / n_1
+    var_y_0 = np.sum(np.array([abs(a - mean_y_0)**2 for a in y_0])) / n_0
+    var_y_1 = np.sum(np.array([abs(a - mean_y_1)**2 for a in y_1])) / n_1
+    cov_0 = np.sum((x_0 - mean_x_0.reshape(-1, 1)) * (y_0 - mean_y_0.reshape(-1, 1)), axis=1) / n_0
+    cov_1 = np.sum((x_1 - mean_x_1.reshape(-1, 1)) * (y_1 - mean_y_1.reshape(-1, 1)), axis=1) / n_1
+
+    var_0 = var_x_0 / mean_y_0 ** 2 + var_y_0 * mean_x_0 ** 2 / mean_y_0 ** 4 - 2 * mean_x_0 / mean_y_0 ** 3 * cov_0
+    var_1 = var_x_1 / mean_y_1 ** 2 + var_y_1 * mean_x_1 ** 2 / mean_y_1 ** 4 - 2 * mean_x_1 / mean_y_1 ** 3 * cov_1
+
+    rto_0 = np.sum(x_0) / np.sum(y_0)
+    rto_1 = np.sum(x_1) / np.sum(y_1)
+    statistic = (rto_1 - rto_0) / np.sqrt(var_0 / n_0 + var_1 / n_1)
+
+    pvalue = 2 * np.minimum(norm(0, 1).cdf(statistic), 1 - norm(0, 1).cdf(statistic))
+    return pvalue[0]
+
+# =============================================================================
+# =============================================================================
+# Lineralization
+# =============================================================================
+def linearization(x_0, y_0, x_1, y_1):
+    k = x_0.sum() / y_0.sum()
+    l_0 = x_0 - k * y_0
+    l_1 = x_1 - k * y_1
+    return l_0, l_1
+
+
