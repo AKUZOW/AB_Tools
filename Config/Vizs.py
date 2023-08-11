@@ -21,3 +21,9 @@ plt.xlabel('boot_data')
 plt.ylabel('frequency')
 plt.title("Histogram of boot_data")
 plt.show()
+
+#
+sns.histplot(data=df_combined, x="val", hue="variant", element="poly")
+g = sns.FacetGrid(df_combined, col="variant", hue="group")
+g.map_dataframe(sns.histplot, x="val")
+g.add_legend()
